@@ -20,6 +20,59 @@
 # error "Your kernel does not support KProbes, but this is required to compile binder as a kernel module on kernel 5.7 and later"
 #endif
 
+#if defined(CONFIG_X86_KERNEL_IBT) && defined(CONFIG_X86_64)
+	#define IBS_NOTRACK_DECLARELOCALVARS(RET_TYPE)					\
+		RET_TYPE ret_val = 0; 										\
+		u64 msr_val = 0;
+	#define IBS_NOTRACK_ENABLE()									\
+		rdmsrl(MSR_IA32_S_CET, msr_val);							\
+		if (!(msr_val & CET_NO_TRACK_EN))							\
+			wrmsrl(MSR_IA32_S_CET, msr_val & CET_NO_TRACK_EN);
+	#define __IBS_NOTRACK_CALL(ret, func, arg1, arg2, arg3, arg4)	\
+		if (cpu_feature_enabled(X86_FEATURE_IBT)) {					\
+			IBS_NOTRACK_ENABLE();									\
+			__asm__ __volatile__(									\
+				"\tmovq %q1,%q0\n"									\
+				"\tnotrack call *%q0\n"								\
+				: "+a" (ret_val)									\
+				: "o" (func), "D" (arg1), "S" (arg2), "d" (arg3), "c" (arg4) \
+				: "memory");										\
+		} else {													\
+			ret;													\
+		}
+	#define IBS_NOTRACK_CALL1(func, arg1)							\
+		__IBS_NOTRACK_CALL(ret_val = func(arg1),					\
+			func, arg1, 0, 0, 0)
+	#define IBS_NOTRACK_CALL1_VOID(func, arg1)						\
+		__IBS_NOTRACK_CALL(func(arg1),								\
+			func, arg1, 0, 0, 0)
+	#define IBS_NOTRACK_CALL2(func, arg1, arg2)						\
+		__IBS_NOTRACK_CALL(ret_val = func(arg1, arg2),				\
+			func, arg1, arg2, 0, 0)
+	#define IBS_NOTRACK_CALL3(func, arg1, arg2, arg3)				\
+		__IBS_NOTRACK_CALL(ret_val = func(arg1, arg2, arg3),		\
+			func, arg1, arg2, arg3, 0)
+	#define IBS_NOTRACK_CALL3_VOID(func, arg1, arg2, arg3)			\
+		__IBS_NOTRACK_CALL(func(arg1, arg2, arg3),					\
+			func, arg1, arg2, arg3, 0)
+	#define IBS_NOTRACK_CALL4_VOID(func, arg1, arg2, arg3, arg4)	\
+		__IBS_NOTRACK_CALL(func(arg1, arg2, arg3, arg4),			\
+			func, arg1, arg2, arg3, arg4)
+#else
+	#define IBS_NOTRACK_DECLARELOCALVARS(RET_TYPE)
+	#define IBS_NOTRACK_CALL1(func, arg1)							\
+		ret_val = func(arg1);
+	#define IBS_NOTRACK_CALL1_VOID(func, arg1)						\
+		func(arg1);
+	#define IBS_NOTRACK_CALL2(func, arg1, arg2)						\
+		ret_val = func(arg1, arg2);
+	#define IBS_NOTRACK_CALL3(func, arg1, arg2, arg3)				\
+		ret_val = func(arg1, arg2, arg3);
+	#define IBS_NOTRACK_CALL4_VOID(func, arg1, arg2, arg3, arg4)	\
+		ret_val = func(arg1, arg2, arg3, arg4);
+#endif
+#define IBS_NOTRACK_RETURNVALUE ret_val
+
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
 static int dummy_kprobe_handler(struct kprobe *p, struct pt_regs *regs)
@@ -61,10 +114,12 @@ static unsigned long kallsyms_lookup_name_wrapper(const char *name)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0))
 	static kallsyms_lookup_name_t func_ptr = NULL;
+	IBS_NOTRACK_DECLARELOCALVARS(unsigned long);
 	if (!func_ptr)
 		func_ptr = get_kallsyms_lookup_name_ptr();
 
-	return func_ptr(name);
+	IBS_NOTRACK_CALL1(func_ptr, name);
+	return IBS_NOTRACK_RETURNVALUE;
 #else
 	return kallsyms_lookup_name(name);
 #endif
@@ -85,6 +140,7 @@ int close_fd_get_file(unsigned int fd, struct file **res)
 int __close_fd_get_file(unsigned int fd, struct file **res)
 #endif
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!close_fd_get_file_ptr)
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0))
 		close_fd_get_file_ptr = kallsyms_lookup_name_wrapper("close_fd_get_file");
@@ -93,7 +149,8 @@ int __close_fd_get_file(unsigned int fd, struct file **res)
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0))
-    return close_fd_get_file_ptr(fd);
+	IBS_NOTRACK_CALL1(close_fd_get_file_ptr, fd);
+	return IBS_NOTRACK_RETURNVALUE;
 #else
 	return close_fd_get_file_ptr(fd, res);
 #endif
@@ -103,54 +160,65 @@ static int (*can_nice_ptr)(const struct task_struct *, const int) = NULL;
 
 int can_nice(const struct task_struct *p, const int nice)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!can_nice_ptr)
 		can_nice_ptr = kallsyms_lookup_name_wrapper("can_nice");
-	return can_nice_ptr(p, nice);
+	IBS_NOTRACK_CALL2(can_nice_ptr, p, nice);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 static void (*mmput_async_ptr)(struct mm_struct *mm) = NULL;
 
 void mmput_async(struct mm_struct *mm)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(void*);
 	if (!mmput_async_ptr)
 		mmput_async_ptr = kallsyms_lookup_name_wrapper("mmput_async");
-	return mmput_async_ptr(mm);
+	IBS_NOTRACK_CALL1_VOID(mmput_async_ptr, mm);
 }
 
 static int (*security_binder_set_context_mgr_ptr)(struct task_struct *mgr) = NULL;
 
 int security_binder_set_context_mgr(struct task_struct *mgr)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!security_binder_set_context_mgr_ptr)
 		security_binder_set_context_mgr_ptr = kallsyms_lookup_name_wrapper("security_binder_set_context_mgr");
-	return security_binder_set_context_mgr_ptr(mgr);
+	IBS_NOTRACK_CALL1(security_binder_set_context_mgr_ptr, mgr);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 static int (*security_binder_transaction_ptr)(struct task_struct *from, struct task_struct *to) = NULL;
 
 int security_binder_transaction(struct task_struct *from, struct task_struct *to)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!security_binder_transaction_ptr)
 		security_binder_transaction_ptr = kallsyms_lookup_name_wrapper("security_binder_transaction");
-	return security_binder_transaction_ptr(from, to);
+	IBS_NOTRACK_CALL2(security_binder_transaction_ptr, from, to);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 static int (*security_binder_transfer_binder_ptr)(struct task_struct *from, struct task_struct *to) = NULL;
 
 int security_binder_transfer_binder(struct task_struct *from, struct task_struct *to)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!security_binder_transfer_binder_ptr)
 		security_binder_transfer_binder_ptr = kallsyms_lookup_name_wrapper("security_binder_transfer_binder");
-	return security_binder_transfer_binder_ptr(from, to);
+	IBS_NOTRACK_CALL2(security_binder_transfer_binder_ptr, from, to);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 static int (*security_binder_transfer_file_ptr)(struct task_struct *from, struct task_struct *to, struct file *file) = NULL;
 
 int security_binder_transfer_file(struct task_struct *from, struct task_struct *to, struct file *file)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!security_binder_transfer_file_ptr)
 		security_binder_transfer_file_ptr = kallsyms_lookup_name_wrapper("security_binder_transfer_file");
-	return security_binder_transfer_file_ptr(from, to, file);
+	IBS_NOTRACK_CALL3(security_binder_transfer_file_ptr, from, to, file);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 static int (*task_work_add_ptr)(struct task_struct *task, struct callback_head *work,
@@ -159,9 +227,11 @@ static int (*task_work_add_ptr)(struct task_struct *task, struct callback_head *
 int task_work_add(struct task_struct *task, struct callback_head *work,
 		  enum task_work_notify_mode notify)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(int);
 	if (!task_work_add_ptr)
 		task_work_add_ptr = kallsyms_lookup_name_wrapper("task_work_add");
-	return task_work_add_ptr(task, work, notify);
+	IBS_NOTRACK_CALL3(task_work_add_ptr, task, work, notify);
+	return IBS_NOTRACK_RETURNVALUE;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0))
@@ -169,18 +239,20 @@ static void (*zap_page_range_single_ptr)(struct vm_area_struct *, unsigned long,
 
 void zap_page_range_single(struct vm_area_struct *vma, unsigned long address, unsigned long size, struct zap_details *details)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(void*);
 	if (!zap_page_range_single_ptr)
 		zap_page_range_single_ptr = kallsyms_lookup_name_wrapper("zap_page_range_single");
-	zap_page_range_single_ptr(vma, address, size, details);
+	IBS_NOTRACK_CALL4_VOID(zap_page_range_single_ptr, vma, address, size, details);
 }
 #else
 static void (*zap_page_range_ptr)(struct vm_area_struct *, unsigned long, unsigned long) = NULL;
 
 void zap_page_range(struct vm_area_struct *vma, unsigned long address, unsigned long size)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(void*);
 	if (!zap_page_range_ptr)
 		zap_page_range_ptr = kallsyms_lookup_name_wrapper("zap_page_range");
-	zap_page_range_ptr(vma, address, size);
+	IBS_NOTRACK_CALL3_VOID(zap_page_range_ptr, vma, address, size);
 }
 #endif
 
@@ -188,9 +260,10 @@ static void (*put_ipc_ns_ptr)(struct ipc_namespace *ns) = NULL;
 
 void put_ipc_ns(struct ipc_namespace *ns)
 {
+	IBS_NOTRACK_DECLARELOCALVARS(void*);
 	if (!put_ipc_ns_ptr)
 		put_ipc_ns_ptr = kallsyms_lookup_name_wrapper("put_ipc_ns");
-	put_ipc_ns_ptr(ns);
+	IBS_NOTRACK_CALL1_VOID(put_ipc_ns_ptr, ns);
 }
 
 static struct ipc_namespace *init_ipc_ns_ptr = NULL;
